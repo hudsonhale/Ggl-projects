@@ -6,7 +6,7 @@
  *
  * Events:
  *   status  { state: 'idle'|'connecting'|'live'|'reconnecting'|'error', message? }
- *   audio   { pcm: Int16Array }            // 24 kHz mono
+ *   audio   { pcm: Int16Array }            // 24 kHz mono (normally routed server→partner directly)
  *   input   { text, lang }                 // transcript of what the speaker said
  *   output  { text, lang }                 // transcript of the translation
  *   turn    {}                             // model signalled end of a turn
@@ -19,9 +19,13 @@ export class LiveTranslator extends EventTarget {
   #retry = 0;
   #retryTimer = null;
 
-  constructor({ target }) {
+  #cid;
+
+  /** @param {{target: string, cid: string}} opts  cid = this tab's id, so the server can route the voice to the partner */
+  constructor({ target, cid }) {
     super();
     this.#target = target;
+    this.#cid = cid;
   }
 
   get target() {
@@ -62,6 +66,8 @@ export class LiveTranslator extends EventTarget {
   /** @param {ArrayBuffer} buffer 16-bit PCM @ 16 kHz */
   sendPcm(buffer) {
     if (!this.#ready || this.#ws?.readyState !== WebSocket.OPEN) return;
+    // Never let mic audio pile up behind a slow uplink — stale audio only adds delay.
+    if (this.#ws.bufferedAmount > 48 * 1024) return;
     this.#ws.send(
       JSON.stringify({
         realtimeInput: { audio: { data: toBase64(buffer), mimeType: 'audio/pcm;rate=16000' } },
@@ -73,7 +79,7 @@ export class LiveTranslator extends EventTarget {
 
   #connect(isHandover) {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${location.host}/translate?target=${encodeURIComponent(this.#target)}`);
+    const ws = new WebSocket(`${proto}://${location.host}/translate?target=${encodeURIComponent(this.#target)}&cid=${encodeURIComponent(this.#cid || '')}`);
     ws.binaryType = 'arraybuffer';
     let fatal = false;
 
@@ -92,8 +98,8 @@ export class LiveTranslator extends EventTarget {
 
       if (msg.error) {
         if (ws.__closedByHandover) return;
-        fatal = /API key|API_KEY|permission|not found|invalid/i.test(msg.error.message || '');
-        this.#emit('status', { state: 'error', message: msg.error.message });
+        fatal = Boolean(msg.error.fatal) || ['missing', 'invalid', 'permission', 'model', 'billing'].includes(msg.error.kind);
+        this.#emit('status', { state: 'error', message: msg.error.message, kind: msg.error.kind || 'other', fatal });
         return;
       }
 

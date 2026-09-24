@@ -96,7 +96,16 @@ export class AudioEngine {
     return this.playbackSetup;
   }
 
-  /** Queue a chunk of the partner's translated 24 kHz PCM for gap-free playback. */
+  /**
+   * Queue a chunk of the partner's translated 24 kHz PCM.
+   *
+   * Latency control — Gemini streams audio continuously (including near-silent filler), so a
+   * naive "append forever" queue turns every network hiccup into permanent, growing delay.
+   * Here we always steer back toward live:
+   *   • behind by > 0.25 s  → quiet/filler chunks are skipped entirely
+   *   • behind by > 0.6 s   → speech plays slightly faster (1.1–1.2×) until caught up
+   *   • behind by > 2.0 s   → the backlog is dropped and playback jumps to live
+   */
   playIncoming(int16) {
     if (!int16.length) return;
     const f32 = new Float32Array(int16.length);
@@ -106,20 +115,41 @@ export class AudioEngine {
       f32[i] = v;
       sumSq += v * v;
     }
+    const rms = Math.sqrt(sumSq / int16.length);
+    const speech = rms > 0.01;
+    const now = this.ctx.currentTime;
+    let ahead = this.nextTime - now;
+
+    if (ahead > 2.0) {
+      this.flushIncoming();
+      ahead = 0;
+    }
+    if (!speech && ahead > 0.25) return; // don't queue silence when we're behind
+    if (ahead < 0.02) {
+      // Idle/underrun: restart with a tiny jitter buffer.
+      if (!speech) return; // nothing worth playing yet
+      this.nextTime = now + 0.04;
+      ahead = 0.04;
+    }
+
     const buf = this.ctx.createBuffer(1, f32.length, 24000);
     buf.copyToChannel(f32, 0);
     const src = this.ctx.createBufferSource();
     src.buffer = buf;
+    const rate = ahead > 1.2 ? 1.2 : ahead > 0.6 ? 1.1 : 1;
+    src.playbackRate.value = rate;
     src.connect(this.inGain);
-    const now = this.ctx.currentTime;
-    // Small jitter buffer: if we've fallen behind, restart slightly in the future.
-    if (this.nextTime < now + 0.02) this.nextTime = now + 0.08;
     src.start(this.nextTime);
-    this.nextTime += buf.duration;
+    this.nextTime += buf.duration / rate;
     // Remember when audible speech (not the model's near-silent filler) will finish playing.
-    if (Math.sqrt(sumSq / int16.length) > 0.008) this.speechUntil = this.nextTime;
+    if (speech) this.speechUntil = this.nextTime;
     this.sources.add(src);
     src.onended = () => this.sources.delete(src);
+  }
+
+  /** Seconds of translated audio queued ahead of "now" (for diagnostics). */
+  get incomingLag() {
+    return Math.max(0, this.nextTime - this.ctx.currentTime);
   }
 
   /** True while the partner's translated *speech* is audible (plus a short tail), used by the echo guard. */
@@ -147,5 +177,73 @@ export class AudioEngine {
     let sum = 0;
     for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
     return Math.sqrt(sum / data.length);
+  }
+}
+
+/**
+ * VoiceGate — only lets the person in front of the camera through to the translator.
+ *
+ * Runs on each 40 ms mic chunk (after the browser's echo cancellation / noise suppression /
+ * voice isolation). It tracks two levels:
+ *   • the room's noise floor (fan, traffic, keyboard…)
+ *   • the main speaker's recent speech level (the person closest to the mic is the loudest)
+ * The gate opens only for sound well above the noise floor AND within ~12 dB of the main
+ * speaker — so distant voices, TVs and background chatter are replaced with silence.
+ * A short pre-roll keeps word onsets, and a hang time avoids chopping words apart.
+ */
+export class VoiceGate {
+  constructor({ chunkMs = 40 } = {}) {
+    this.chunkMs = chunkMs;
+    this.floor = 0.004; // running noise-floor estimate (RMS)
+    this.speechLevel = 0; // recent level of the main speaker (RMS)
+    this.open = false;
+    this.hang = 0; // ms left before closing
+    this.preroll = [];
+  }
+
+  reset() {
+    this.open = false;
+    this.hang = 0;
+    this.preroll = [];
+  }
+
+  /**
+   * @param {ArrayBuffer} buf 16 kHz Int16 PCM chunk
+   * @returns {ArrayBuffer[]} chunks to send (silence while closed, pre-roll + audio when opening)
+   */
+  process(buf) {
+    const s = new Int16Array(buf);
+    let sumSq = 0;
+    for (let i = 0; i < s.length; i++) sumSq += (s[i] / 0x8000) ** 2;
+    const rms = Math.sqrt(sumSq / s.length);
+
+    // Noise floor: falls quickly, rises slowly (and only while nobody is talking).
+    if (rms < this.floor) this.floor = this.floor * 0.8 + rms * 0.2;
+    else if (!this.open) this.floor = Math.min(0.05, this.floor * 0.995 + rms * 0.005);
+
+    const threshold = Math.max(0.012, this.floor * 3.2, this.speechLevel * 0.25);
+    const voiced = rms > threshold;
+
+    if (voiced) {
+      // Track the main speaker's level (fast attack, slow release).
+      this.speechLevel = rms > this.speechLevel ? this.speechLevel * 0.6 + rms * 0.4 : this.speechLevel * 0.97 + rms * 0.03;
+      this.hang = 450;
+    } else {
+      this.hang -= this.chunkMs;
+      this.speechLevel *= 0.998; // slowly forget, so a quieter speaker can take over
+    }
+
+    const wasOpen = this.open;
+    this.open = voiced || this.hang > 0;
+
+    if (this.open) {
+      const out = wasOpen ? [buf] : [...this.preroll, buf];
+      this.preroll = [];
+      return out;
+    }
+    this.preroll.push(buf);
+    // Hold ~120 ms so a word's first syllable isn't clipped; older chunks go out as silence.
+    if (this.preroll.length > 3) return [new ArrayBuffer(this.preroll.shift().byteLength)];
+    return [];
   }
 }

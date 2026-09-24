@@ -1,5 +1,5 @@
 import { LANGUAGES, languageName, guessBrowserLanguage, isRtl } from './languages.js';
-import { AudioEngine } from './audio.js';
+import { AudioEngine, VoiceGate } from './audio.js';
 import { LiveTranslator } from './translator.js';
 import { PeerLink } from './rtc.js';
 
@@ -24,6 +24,14 @@ const el = {
   newRoomBtn: $('newRoomBtn'),
   joinBtn: $('joinBtn'),
   keyWarning: $('keyWarning'),
+  keyWarningText: $('keyWarningText'),
+  keyHelpBtn: $('keyHelpBtn'),
+  keyHelp: $('keyHelp'),
+  keyHelpWhy: $('keyHelpWhy'),
+  keyHelpSteps: $('keyHelpSteps'),
+  keyHelpDiag: $('keyHelpDiag'),
+  keyRecheckBtn: $('keyRecheckBtn'),
+  keyCloseBtn: $('keyCloseBtn'),
 
   remoteVideo: $('remoteVideo'),
   relayCanvas: $('relayCanvas'),
@@ -45,9 +53,6 @@ const el = {
   selfTile: $('selfTile'),
   localVideo: $('localVideo'),
   selfBars: $('selfBars'),
-  outgoing: $('outgoing'),
-  outgoingLabel: $('outgoingLabel'),
-  outgoingText: $('outgoingText'),
   transcript: $('transcript'),
   transcriptList: $('transcriptList'),
   transcriptEmpty: $('transcriptEmpty'),
@@ -81,7 +86,12 @@ const state = {
   partnerSince: 0,
   headphones: localStorage.getItem('portal.headphones') === '1',
   sendSignal: null,
+  relay: null, // fallback-video socket
+  // Stable id for this tab: lets the server route my translated voice straight to my partner,
+  // and survive reconnects without being mistaken for a third person.
+  cid: uid(),
 };
+const gate = new VoiceGate({ chunkMs: 40 });
 
 const audio = new AudioEngine();
 const resumeAudio = () => audio.resume().catch(() => {});
@@ -109,26 +119,24 @@ async function init() {
 
   try {
     state.config = await (await fetch('/api/config')).json();
-    el.keyWarning.hidden = state.config.hasApiKey;
-    if (!state.config.hasApiKey && state.config.keyDiag) {
-      const d = state.config.keyDiag;
-      const pre = document.createElement('pre');
-      pre.style.cssText = 'white-space:pre-wrap;font-size:11px;margin:8px 0 0;opacity:.85';
-      pre.textContent =
-        `Server sees: ${d.vars.join('; ')}\n` +
-        `Env files: ${d.envFiles.join(', ') || 'none'}\n` +
-        `Server started ${d.serverStartedSecondsAgo}s ago`;
-      el.keyWarning.querySelector('span:last-child').appendChild(pre);
-    }
   } catch {}
+  checkKey();
 
   audio.onMicLevel = (lvl) => (state.micLevel = lvl);
   // Echo guard: unless the user wears headphones, feed the translator silence while the partner's
   // translated voice is playing from the speakers, so it can't be picked up and translated back.
   audio.onPcm = (buf) => {
     if (!state.translator) return;
-    const guard = !state.headphones && audio.isPlayingIncoming();
-    state.translator.sendPcm(guard ? new ArrayBuffer(buf.byteLength) : buf);
+    // 1) Echo guard (speaker mode): while the partner's translated voice is coming out of the
+    //    speakers, send silence so it can't be re-translated back to them (the "repeating" bug).
+    if (!state.headphones && audio.isPlayingIncoming(0.6)) {
+      gate.reset();
+      state.translator.sendPcm(new ArrayBuffer(buf.byteLength));
+      return;
+    }
+    // 2) Voice gate: only the person in front of the camera gets through — background noise and
+    //    distant voices become silence.
+    for (const chunk of gate.process(buf)) state.translator.sendPcm(chunk);
   };
   el.headphonesBtn.setAttribute('aria-pressed', String(state.headphones));
 
@@ -143,9 +151,10 @@ async function startMedia({ camId, micId } = {}) {
   const constraints = {
     video: { width: { ideal: 1280 }, height: { ideal: 720 }, ...(camId ? { deviceId: { exact: camId } } : {}) },
     audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
+      echoCancellation: { ideal: true },
+      noiseSuppression: { ideal: true },
+      autoGainControl: { ideal: true },
+      voiceIsolation: { ideal: true }, // Chrome's ML voice isolation where available (ignored elsewhere)
       channelCount: 1,
       ...(micId ? { deviceId: { exact: micId } } : {}),
     },
@@ -230,7 +239,7 @@ function enterCall() {
   el.lobby.hidden = true;
   el.call.hidden = false;
   el.roomLabel.textContent = state.room;
-  el.shareInput.value = `${location.origin}/?room=${encodeURIComponent(state.room)}`;
+  el.shareInput.value = shareUrl(state.room);
   el.callLangSelect.value = state.me.lang;
   el.localVideo.srcObject = state.stream;
   el.transcriptList.innerHTML = '';
@@ -240,6 +249,22 @@ function enterCall() {
   setXlStatus('idle');
   audio.setupPlayback();
   connectSignal();
+  connectRelay();
+}
+
+/**
+ * The invite link must work for the other person: never hand out an AI Studio *dev* URL
+ * (ais-dev-…, only works for the app owner) — use the shared *pre* URL (ais-pre-…) instead,
+ * or PUBLIC_URL if the server sets one.
+ */
+function shareUrl(room) {
+  let base = state.config.publicUrl || location.origin;
+  try {
+    const u = new URL(base);
+    u.hostname = u.hostname.replace(/^ais-dev-/, 'ais-pre-');
+    base = u.origin;
+  } catch {}
+  return `${base.replace(/\/$/, '')}/?room=${encodeURIComponent(room)}`;
 }
 
 function leaveCall({ toLobby = true } = {}) {
@@ -254,6 +279,10 @@ function leaveCall({ toLobby = true } = {}) {
     state.signal.close();
   }
   state.signal = null;
+  const relay = state.relay;
+  state.relay = null;
+  try { relay?.close(); } catch {}
+  gate.reset();
   el.remoteVideo.srcObject = null;
   if (toLobby) {
     el.call.hidden = true;
@@ -272,7 +301,7 @@ function connectSignal() {
   const sendSignal = (msg) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(msg));
   state.sendSignal = sendSignal;
 
-  ws.onopen = () => sendSignal({ type: 'join', room: state.room, name: state.me.name, lang: state.me.lang });
+  ws.onopen = () => sendSignal({ type: 'join', room: state.room, cid: state.cid, name: state.me.name, lang: state.me.lang });
 
   ws.onmessage = (ev) => {
     if (typeof ev.data !== 'string') return handleBinary(ev.data);
@@ -388,14 +417,12 @@ function setPartner(p) {
 // ---------------------------------------------------------------------------
 function startTranslator(target) {
   if (!state.translator) {
-    const t = new LiveTranslator({ target });
-    t.addEventListener('status', (e) => setXlStatus(e.detail.state, e.detail.message));
-    t.addEventListener('audio', (e) => {
-      const pcm = e.detail.pcm;
-      let peak = 0;
-      for (let i = 0; i < pcm.length; i += 4) peak = Math.max(peak, Math.abs(pcm[i]));
-      if (peak < 8) return; // pure digital silence — nothing to play
-      sendBinary(1, new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength));
+    // The translated voice is sent by the server straight to the partner (lowest latency);
+    // this client only receives transcripts, used for the partner's captions.
+    const t = new LiveTranslator({ target, cid: state.cid });
+    t.addEventListener('status', (e) => {
+      setXlStatus(e.detail.state, e.detail.message);
+      if (e.detail.state === 'error' && e.detail.kind && e.detail.kind !== 'other') showKeyHelp(e.detail.kind, e.detail.message);
     });
     t.addEventListener('input', (e) => onOwnSpeech('original', e.detail.text, e.detail.lang));
     t.addEventListener('output', (e) => onOwnSpeech('translated', e.detail.text, e.detail.lang));
@@ -461,70 +488,55 @@ function publishSegment() {
   if (!seg) return;
   const snapshot = { ...seg };
   state.sendSignal?.({ type: 'seg', seg: snapshot, from: state.me.name });
-  renderOutgoing(snapshot);
+  // No captions on my own bubble — my words only appear as captions on my partner's screen
+  // (and in the transcript panel).
   upsertTranscript(snapshot, 'me');
-}
-
-let outgoingFade = null;
-function renderOutgoing(s) {
-  const text = (s.translated || s.original).trim();
-  if (!text) return;
-  el.outgoing.hidden = false;
-  el.outgoing.classList.remove('fade');
-  el.outgoingLabel.textContent = s.translated
-    ? `You${s.srcLang ? ` (${languageName(s.srcLang)})` : ''} → ${languageName(s.tgtLang)}`
-    : `You${s.srcLang ? ` · ${languageName(s.srcLang)}` : ''}`;
-  el.outgoingText.textContent = text;
-  el.outgoingText.dir = isRtl(s.translated ? s.tgtLang : s.srcLang) ? 'rtl' : 'auto';
-  clearTimeout(outgoingFade);
-  outgoingFade = setTimeout(() => {
-    el.outgoing.classList.add('fade');
-    setTimeout(() => el.outgoing.classList.contains('fade') && (el.outgoing.hidden = true), 600);
-  }, 5000);
 }
 
 // ---------------------------------------------------------------------------
 // Incoming captions (partner's speech, translated into my language)
 // ---------------------------------------------------------------------------
-// Binary frames relayed by the server: [1][PCM 24 kHz] = partner's translated voice, [2][JPEG] = fallback video.
-function sendBinary(kind, bytes) {
-  const ws = state.signal;
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const out = new Uint8Array(bytes.byteLength + 1);
-  out[0] = kind;
-  out.set(bytes, 1);
-  ws.send(out);
-}
-
-let relayFrameAt = 0;
-const relayCtx = el.relayCanvas.getContext('2d');
+// Binary frames from the server on the signaling socket: [1][PCM 24 kHz] = partner's translated voice.
 function handleBinary(buf) {
   const kind = new Uint8Array(buf, 0, 1)[0];
-  const payload = buf.slice(1);
-  if (kind === 1) {
-    if (payload.byteLength % 2 === 0) audio.playIncoming(new Int16Array(payload));
-  } else if (kind === 2) {
-    createImageBitmap(new Blob([payload], { type: 'image/jpeg' }))
+  if (kind === 1 && (buf.byteLength - 1) % 2 === 0) audio.playIncoming(new Int16Array(buf.slice(1)));
+}
+
+// Fallback video relay: its own socket, so video frames can never delay the translated voice.
+let relayFrameAt = 0;
+const relayCtx = el.relayCanvas.getContext('2d');
+function connectRelay() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${proto}://${location.host}/relay?room=${encodeURIComponent(state.room)}`);
+  ws.binaryType = 'arraybuffer';
+  state.relay = ws;
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string') return;
+    createImageBitmap(new Blob([ev.data], { type: 'image/jpeg' }))
       .then((bmp) => {
         relayCtx.drawImage(bmp, 0, 0, el.relayCanvas.width, el.relayCanvas.height);
         bmp.close();
         relayFrameAt = performance.now();
       })
       .catch(() => {});
-  }
+  };
+  ws.onclose = () => {
+    if (state.relay === ws) state.relay = null;
+    if (state.inCall) setTimeout(() => state.inCall && !state.relay && connectRelay(), 1500);
+  };
 }
 
 // ---------------------------------------------------------------------------
 // Video: direct WebRTC when possible, automatic server relay when not
 // ---------------------------------------------------------------------------
-const RELAY_SIZE = 400;
+const RELAY_SIZE = 320;
 const relaySrc = Object.assign(document.createElement('canvas'), { width: RELAY_SIZE, height: RELAY_SIZE });
 const relaySrcCtx = relaySrc.getContext('2d');
 let relayTimer = null;
 let relayBusy = false;
 
 function setRelaySending(on) {
-  if (on && !relayTimer) relayTimer = setInterval(sendRelayFrame, 100); // ~10 fps
+  if (on && !relayTimer) relayTimer = setInterval(sendRelayFrame, 110); // ~9 fps
   if (!on && relayTimer) {
     clearInterval(relayTimer);
     relayTimer = null;
@@ -533,17 +545,18 @@ function setRelaySending(on) {
 
 function sendRelayFrame() {
   const v = el.localVideo;
-  if (relayBusy || !state.camOn || !v.videoWidth || (state.signal?.bufferedAmount || 0) > 256 * 1024) return;
+  const ws = state.relay;
+  if (relayBusy || !state.camOn || !v.videoWidth || !ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount > 64 * 1024) return;
   const side = Math.min(v.videoWidth, v.videoHeight); // centre square — it's shown in a circle anyway
   relaySrcCtx.drawImage(v, (v.videoWidth - side) / 2, (v.videoHeight - side) / 2, side, side, 0, 0, RELAY_SIZE, RELAY_SIZE);
   relayBusy = true;
   relaySrc.toBlob(
     async (blob) => {
       relayBusy = false;
-      if (blob) sendBinary(2, new Uint8Array(await blob.arrayBuffer()));
+      if (blob && state.relay?.readyState === WebSocket.OPEN) state.relay.send(await blob.arrayBuffer());
     },
     'image/jpeg',
-    0.62,
+    0.6,
   );
 }
 
@@ -741,6 +754,154 @@ function tick() {
 function drawBars(bars, v) {
   bars.forEach((b, i) => (b.style.height = `${4 + v * 10 * SHAPE[i]}px`));
 }
+
+// ---------------------------------------------------------------------------
+// Gemini API key: verify up front, and if anything is wrong explain exactly how to fix it
+// ---------------------------------------------------------------------------
+const AI_STUDIO_SECRET_STEPS = [
+  'Open your app in <b>Google AI Studio</b> (aistudio.google.com → <b>Build</b> → your app).',
+  'Click the <b>Settings</b> gear (top right) → <b>Secrets</b>.',
+];
+const RESTART_STEPS = [
+  '<b>Restart the app server</b>: reload the whole AI Studio browser tab (refreshing only the preview keeps the old server running, and a server only receives secrets when it starts).',
+  'If you share the <b>published</b> link, click <b>Publish</b> again so the live version gets the new secret too.',
+  'Come back here and click <b>Check again</b>.',
+];
+const KEY_FIXES = {
+  missing: {
+    short: 'Translation is off: the server has no Gemini API key.',
+    why: 'The server started without a Gemini API key. Keys are deliberately <i>not</i> stored in GitHub, so every new copy of the app (a fresh AI Studio import, a new deploy) needs the key added once as a secret.',
+    steps: [
+      ...AI_STUDIO_SECRET_STEPS,
+      'Add a secret named exactly <code>GEMINI_API_KEY</code> (all caps, underscores).',
+      'For the value, paste your key from <b>aistudio.google.com/apikey</b>. It starts with <code>AIza</code> or <code>AQ.</code>. Paste only the key, with no quotes and no spaces.',
+      ...RESTART_STEPS,
+      'Running on your own computer instead? Put <code>GEMINI_API_KEY=your-key</code> in <code>live-translate-portal/.env</code> and restart the server.',
+    ],
+  },
+  invalid: {
+    short: 'Translation is off: Google rejected the Gemini API key.',
+    why: 'The server has a key, but Google says it isn’t valid. Usually it was mistyped, copied with extra characters, deleted, or rotated.',
+    steps: [
+      'Go to <b>aistudio.google.com/apikey</b> and copy your key again, or click <b>Create API key</b> to make a new one.',
+      ...AI_STUDIO_SECRET_STEPS,
+      'Edit <code>GEMINI_API_KEY</code> and replace the value with the key you just copied. Paste only the key: no quotes, no spaces, no <code>GEMINI_API_KEY=</code> in front.',
+      ...RESTART_STEPS,
+    ],
+  },
+  permission: {
+    short: 'Translation is off: this API key isn’t allowed to use the Gemini API.',
+    why: 'The key is real, but its Google Cloud project has the Gemini API turned off, or the key is restricted to other APIs.',
+    steps: [
+      'Open <b>aistudio.google.com/apikey</b> and note which <b>project</b> your key belongs to.',
+      'Open <b>console.cloud.google.com/apis/library/generativelanguage.googleapis.com</b>, select that project and click <b>Enable</b>.',
+      'In <b>console.cloud.google.com/apis/credentials</b>, open the key. Under <b>API restrictions</b>, choose “Don’t restrict key” or allow <b>Generative Language API</b>.',
+      'Easiest alternative: create a brand-new key at <b>aistudio.google.com/apikey</b> and put that in the <code>GEMINI_API_KEY</code> secret.',
+      ...RESTART_STEPS,
+    ],
+  },
+  model: {
+    short: 'Translation is off: this API key can’t use Gemini 3.5 Live Translate.',
+    why: 'The key works, but the <code>gemini-3.5-live-translate-preview</code> model isn’t available to it. Preview models can be limited by account, region or billing tier.',
+    steps: [
+      'In Google AI Studio, open <b>Stream / Live</b> and check that <b>Gemini 3.5 Live Translate</b> is listed for your account.',
+      'Make sure the key comes from that same Google account (<b>aistudio.google.com/apikey</b>).',
+      'If you’re on the free tier, click <b>Set up billing</b> next to the key. Some preview models need a paid tier.',
+      'Update the <code>GEMINI_API_KEY</code> secret if you switched keys.',
+      ...RESTART_STEPS,
+    ],
+  },
+  billing: {
+    short: 'Translation is off: billing is required for this key’s project.',
+    why: 'Google requires billing on the key’s project before this model can be used.',
+    steps: [
+      'Open <b>aistudio.google.com/apikey</b> and click <b>Set up billing</b> next to your key (or enable billing for its project in the Google Cloud console).',
+      'Wait a minute for it to take effect.',
+      ...RESTART_STEPS,
+    ],
+  },
+  quota: {
+    short: 'Translation paused: the Gemini API key hit its usage limit.',
+    why: 'The key has used up its requests or minutes for now. Free-tier limits are low for live audio.',
+    steps: [
+      'Wait about a minute and try again. Per-minute limits reset quickly.',
+      'Check usage at <b>aistudio.google.com/usage</b>.',
+      'For more headroom, click <b>Set up billing</b> at <b>aistudio.google.com/apikey</b> to move to a paid tier.',
+      'Click <b>Check again</b> when ready.',
+    ],
+  },
+  network: {
+    short: 'Translation is off: the server couldn’t reach Google.',
+    why: 'The server could not connect to generativelanguage.googleapis.com. This is usually temporary.',
+    steps: ['Wait a few seconds and click <b>Check again</b>.', 'If you’re running locally, check this computer’s internet connection.', 'If it persists in AI Studio, reload the AI Studio tab to restart the server.'],
+  },
+  other: {
+    short: 'Translation is having trouble connecting to Gemini.',
+    why: 'Gemini returned an unexpected error (see technical details).',
+    steps: ['Click <b>Check again</b>.', 'If it keeps happening, reload the AI Studio tab to restart the server.', 'Still failing? Send the technical details below to whoever maintains the app.'],
+  },
+};
+
+let keyIssue = null;
+let keyHelpShownFor = '';
+
+async function checkKey({ fresh = false } = {}) {
+  let r;
+  try {
+    r = await (await fetch(`/api/key-check${fresh ? '?fresh=1' : ''}`)).json();
+  } catch {
+    return; // server unreachable: the signaling layer reports that
+  }
+  if (r.ok) {
+    keyIssue = null;
+    el.keyWarning.hidden = true;
+    if (el.keyHelp.open) {
+      el.keyHelp.close();
+      toast('Gemini API key works. Translation is ready.');
+    }
+    return true;
+  }
+  showKeyHelp(r.kind, r.detail, r.diag);
+  return false;
+}
+
+function showKeyHelp(kind, detail, diag) {
+  const fix = KEY_FIXES[kind] || KEY_FIXES.other;
+  keyIssue = { kind, detail, diag };
+  el.keyWarning.hidden = false;
+  el.keyWarningText.textContent = fix.short;
+  el.keyHelpWhy.innerHTML = fix.why;
+  el.keyHelpSteps.innerHTML = fix.steps.map((s) => `<li>${s}</li>`).join('');
+  el.keyHelpDiag.textContent = [
+    `Problem: ${kind}`,
+    detail ? `Google said: ${detail}` : '',
+    diag ? `Server sees: ${diag.vars.join('; ')}` : '',
+    diag ? `Env files: ${diag.envFiles.join(', ') || 'none'}` : '',
+    diag ? `Server started ${diag.serverStartedSecondsAgo}s ago${diag.serverStartedSecondsAgo > 120 ? ' (it has NOT been restarted since before that, so reload the AI Studio tab)' : ''}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+  // Open the step-by-step automatically the first time each kind of problem appears.
+  if (keyHelpShownFor !== kind && !el.keyHelp.open) {
+    keyHelpShownFor = kind;
+    try { el.keyHelp.showModal(); } catch {}
+  }
+}
+
+el.keyHelpBtn.addEventListener('click', () => {
+  if (keyIssue) showKeyHelp(keyIssue.kind, keyIssue.detail, keyIssue.diag);
+  if (!el.keyHelp.open) el.keyHelp.showModal();
+});
+el.keyCloseBtn.addEventListener('click', () => el.keyHelp.close());
+el.keyRecheckBtn.addEventListener('click', async () => {
+  el.keyRecheckBtn.disabled = true;
+  const ok = await checkKey({ fresh: true });
+  el.keyRecheckBtn.disabled = false;
+  if (ok && state.translator && !state.translator.live && state.partner) {
+    stopTranslator();
+    startTranslator(state.partner.lang);
+  } else if (!ok) toast('Still not working. Follow the steps above, then try again.');
+});
 
 // ---------------------------------------------------------------------------
 // Utils

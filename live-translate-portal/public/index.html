@@ -101,7 +101,7 @@
 
           <div id="keyWarning" class="notice" hidden>
             <span class="ms">error</span>
-            <span>The server has no <code>GEMINI_API_KEY</code>. Video works, but translation won't until it's added. In Google AI Studio: <b>Settings → Secrets</b> → add <code>GEMINI_API_KEY</code>, then restart the app. Running locally: put it in <code>.env</code>.</span>
+            <span><span id="keyWarningText">Translation is unavailable.</span> <button type="button" class="link-btn" id="keyHelpBtn">How to fix</button></span>
           </div>
 
           <ul class="tips">
@@ -164,10 +164,6 @@
       </section>
 
       <aside id="selfTile" class="self-tile">
-        <div id="outgoing" class="outgoing" hidden>
-          <span class="out-label" id="outgoingLabel"></span>
-          <p id="outgoingText"></p>
-        </div>
         <div class="orb orb-self" id="selfOrb">
           <div class="halo" aria-hidden="true"></div>
           <div class="circle">
@@ -220,6 +216,23 @@
 
       <div id="toast" class="toast" role="status" hidden></div>
     </main>
+
+    <dialog id="keyHelp" class="key-help" aria-labelledby="keyHelpTitle">
+      <div class="key-help-head">
+        <span class="ms">key</span>
+        <h2 id="keyHelpTitle">Fix the Gemini API key</h2>
+      </div>
+      <p id="keyHelpWhy" class="key-help-why"></p>
+      <ol id="keyHelpSteps" class="key-help-steps"></ol>
+      <details class="key-help-diag">
+        <summary>Technical details</summary>
+        <pre id="keyHelpDiag"></pre>
+      </details>
+      <div class="key-help-actions">
+        <button id="keyCloseBtn" class="btn btn-text" type="button">Close</button>
+        <button id="keyRecheckBtn" class="btn btn-filled" type="button" autofocus><span class="ms">refresh</span><span>Check again</span></button>
+      </div>
+    </dialog>
 
     <script type="module" src="/js/app.js"></script>
   </body>

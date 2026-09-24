@@ -1,10 +1,10 @@
 /**
  * AudioWorklet that turns microphone audio (at the AudioContext rate, typically 48 kHz)
- * into 16 kHz mono 16-bit little-endian PCM, emitted in 100 ms chunks (1600 samples) —
+ * into 16 kHz mono 16-bit little-endian PCM, emitted in 40 ms chunks (640 samples) for low latency —
  * exactly what Gemini Live Translate expects.
  */
 const TARGET_RATE = 16000;
-const CHUNK_SAMPLES = 1600; // 100 ms @ 16 kHz
+const CHUNK_SAMPLES = 640; // 40 ms @ 16 kHz — small chunks = lower latency
 
 class PcmCaptureProcessor extends AudioWorkletProcessor {
   constructor() {
