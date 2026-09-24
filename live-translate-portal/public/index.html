@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Portal — Live Translated Video Calls with Gemini</title>
+    <meta
+      name="description"
+      content="Face-to-face video calls where every word is translated in real time, in the speaker's own voice, with live captions. Powered by Gemini 3.5 Live Translate."
+    />
+    <meta name="theme-color" content="#f8fafd" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 2a14 14 0 0 1 14 14h-7a7 7 0 0 0-7-7z' fill='%23ea4335'/%3E%3Cpath d='M30 16a14 14 0 0 1-14 14v-7a7 7 0 0 0 7-7z' fill='%23fbbc04'/%3E%3Cpath d='M16 30A14 14 0 0 1 2 16h7a7 7 0 0 0 7 7z' fill='%2334a853'/%3E%3Cpath d='M2 16A14 14 0 0 1 16 2v7a7 7 0 0 0-7 7z' fill='%234285f4'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&display=swap" rel="stylesheet" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,300..500,0..1,0&display=block"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <!-- ============================== LOBBY ============================== -->
+    <main id="lobby" class="view lobby">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">Portal</span>
+          <span class="brand-sub">Live Translate</span>
+        </div>
+      </header>
+
+      <div class="lobby-body">
+        <section class="preview" aria-label="Camera preview">
+          <div class="orb orb-preview" id="previewOrb">
+            <div class="halo" aria-hidden="true"></div>
+            <div class="circle">
+              <video id="previewVideo" class="mirror" autoplay playsinline muted></video>
+              <div id="previewEmpty" class="preview-empty">
+                <span class="ms ms-lg">videocam_off</span>
+                <p id="previewEmptyText">Allow camera &amp; microphone access to preview yourself.</p>
+                <button id="retryMediaBtn" class="btn btn-tonal" type="button">Allow access</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="meter" id="lobbyMeter" aria-label="Microphone level">
+            <span class="ms">mic</span>
+            <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+          </div>
+
+          <div class="devices">
+            <label class="select-chip">
+              <span class="ms">videocam</span>
+              <select id="camSelect" aria-label="Camera"></select>
+              <span class="ms caret">arrow_drop_down</span>
+            </label>
+            <label class="select-chip">
+              <span class="ms">mic</span>
+              <select id="micSelect" aria-label="Microphone"></select>
+              <span class="ms caret">arrow_drop_down</span>
+            </label>
+          </div>
+        </section>
+
+        <section class="join">
+          <h1>Talk to anyone,<br />in any language</h1>
+          <p class="lede">
+            Every word is translated as you speak — in your own voice, with live captions — by Gemini 3.5 Live Translate.
+          </p>
+
+          <form id="joinForm" class="form" autocomplete="off">
+            <div class="field">
+              <input id="nameInput" name="name" type="text" maxlength="40" placeholder=" " required />
+              <label for="nameInput">Your name</label>
+            </div>
+
+            <div class="field field-select">
+              <span class="ms lead">translate</span>
+              <select id="langSelect" name="lang"></select>
+              <label for="langSelect">Your language</label>
+              <span class="ms caret">arrow_drop_down</span>
+            </div>
+            <p class="hint">You'll hear and read your partner in this language. What you say is detected automatically.</p>
+
+            <div class="field-row">
+              <div class="field">
+                <input id="roomInput" name="room" type="text" maxlength="40" placeholder=" " required spellcheck="false" />
+                <label for="roomInput">Room code</label>
+              </div>
+              <button id="newRoomBtn" class="btn-icon" type="button" title="Generate a new room code" aria-label="Generate room code">
+                <span class="ms">refresh</span>
+              </button>
+            </div>
+
+            <button id="joinBtn" class="btn btn-filled btn-lg" type="submit">
+              <span class="ms">video_call</span>
+              <span>Join call</span>
+            </button>
+          </form>
+
+          <div id="keyWarning" class="notice" hidden>
+            <span class="ms">error</span>
+            <span>The server has no <code>GEMINI_API_KEY</code>. Video works, but translation won't until it's added to <code>.env</code>.</span>
+          </div>
+
+          <ul class="tips">
+            <li><span class="ms">headphones</span>Headphones give the cleanest translation</li>
+            <li><span class="ms">link</span>Share the room code or link with your partner</li>
+          </ul>
+        </section>
+      </div>
+    </main>
+
+    <!-- ============================== CALL ============================== -->
+    <main id="call" class="view call" hidden>
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <span class="brand-name">Portal</span>
+        </div>
+        <div class="room-chip">
+          <span class="dot" id="connDot"></span>
+          <span id="roomLabel">room</span>
+        </div>
+        <div class="status-chip" id="xlStatus" title="Gemini Live Translate status">
+          <span class="ms">g_translate</span>
+          <span id="xlStatusText">Translator idle</span>
+        </div>
+      </header>
+
+      <section class="stage">
+        <div class="orb" id="remoteOrb">
+          <div class="halo" aria-hidden="true"></div>
+          <div class="circle">
+            <video id="remoteVideo" autoplay playsinline></video>
+            <div id="remotePlaceholder" class="remote-placeholder">
+              <div class="avatar" id="remoteAvatar">?</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="partner-line" id="partnerChip" hidden>
+          <span class="bars" id="partnerBars"><i></i><i></i><i></i><i></i></span>
+          <strong id="partnerName"></strong>
+          <span class="sep">·</span>
+          <span id="partnerLang"></span>
+        </div>
+
+        <section id="waiting" class="waiting">
+          <h2>Waiting for your partner</h2>
+          <p>Send them this link. Translation starts the moment they join.</p>
+          <div class="share">
+            <span class="ms">link</span>
+            <input id="shareInput" type="text" readonly aria-label="Invite link" />
+            <button id="copyBtn" class="btn btn-filled" type="button">
+              <span class="ms">content_copy</span><span>Copy</span>
+            </button>
+          </div>
+        </section>
+
+        <section id="captions" class="captions" aria-live="polite" aria-label="Live translated captions"></section>
+      </section>
+
+      <aside id="selfTile" class="self-tile">
+        <div id="outgoing" class="outgoing" hidden>
+          <span class="out-label" id="outgoingLabel"></span>
+          <p id="outgoingText"></p>
+        </div>
+        <div class="orb orb-self" id="selfOrb">
+          <div class="halo" aria-hidden="true"></div>
+          <div class="circle">
+            <video id="localVideo" class="mirror" autoplay playsinline muted></video>
+            <span class="ms cam-off-icon">videocam_off</span>
+          </div>
+          <span class="self-label"><span class="bars" id="selfBars"><i></i><i></i><i></i><i></i></span>You</span>
+        </div>
+      </aside>
+
+      <aside id="transcript" class="transcript" hidden aria-label="Conversation transcript">
+        <header>
+          <h2>Conversation</h2>
+          <button id="closeTranscriptBtn" class="btn-icon" type="button" aria-label="Close transcript">
+            <span class="ms">close</span>
+          </button>
+        </header>
+        <ol id="transcriptList" class="transcript-list"></ol>
+        <p class="transcript-empty" id="transcriptEmpty">
+          <span class="ms ms-lg">forum</span>
+          Everything you both say will appear here — original and translated.
+        </p>
+      </aside>
+
+      <nav class="dock" aria-label="Call controls">
+        <button id="micBtn" class="dock-btn" type="button" aria-pressed="true" title="Turn off microphone">
+          <span class="ms on">mic</span><span class="ms off">mic_off</span>
+        </button>
+        <button id="camBtn" class="dock-btn" type="button" aria-pressed="true" title="Turn off camera">
+          <span class="ms on">videocam</span><span class="ms off">videocam_off</span>
+        </button>
+        <button id="ccBtn" class="dock-btn toggle" type="button" aria-pressed="true" title="Captions">
+          <span class="ms">closed_caption</span>
+        </button>
+        <button id="transcriptBtn" class="dock-btn toggle" type="button" aria-pressed="false" title="Conversation transcript">
+          <span class="ms">chat</span>
+        </button>
+        <label class="dock-lang" title="Your language">
+          <span class="ms">translate</span>
+          <select id="callLangSelect" aria-label="Your language"></select>
+          <span class="ms caret">arrow_drop_down</span>
+        </label>
+        <button id="leaveBtn" class="dock-btn dock-leave" type="button" title="Leave call">
+          <span class="ms">call_end</span>
+        </button>
+      </nav>
+
+      <div id="toast" class="toast" role="status" hidden></div>
+    </main>
+
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>
