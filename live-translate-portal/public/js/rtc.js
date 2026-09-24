@@ -14,9 +14,9 @@ export class PeerLink extends EventTarget {
     this.remoteStream = new MediaStream();
 
     const pc = (this.pc = new RTCPeerConnection({ iceServers }));
-    const outStream = new MediaStream([videoTrack, audioTrack].filter(Boolean));
+    const outStream = new MediaStream([videoTrack].filter(Boolean));
     this.videoSender = videoTrack ? pc.addTrack(videoTrack, outStream) : pc.addTransceiver('video', { direction: 'recvonly' }).sender;
-    this.audioSender = pc.addTrack(audioTrack, outStream);
+    this.audioSender = audioTrack ? pc.addTrack(audioTrack, outStream) : null;
 
     pc.onicecandidate = (e) => e.candidate && this.sendSignal({ type: 'ice', candidate: e.candidate });
     pc.ontrack = (e) => {

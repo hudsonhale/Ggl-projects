@@ -26,6 +26,8 @@ const el = {
   keyWarning: $('keyWarning'),
 
   remoteVideo: $('remoteVideo'),
+  relayCanvas: $('relayCanvas'),
+  headphonesBtn: $('headphonesBtn'),
   remotePlaceholder: $('remotePlaceholder'),
   remoteAvatar: $('remoteAvatar'),
   connDot: $('connDot'),
@@ -72,10 +74,13 @@ const state = {
   peer: null,
   translator: null,
   micLevel: 0,
-  remoteAnalyser: null,
   inCall: false,
   micOn: true,
   camOn: true,
+  partnerCamOn: true,
+  partnerSince: 0,
+  headphones: localStorage.getItem('portal.headphones') === '1',
+  sendSignal: null,
 };
 
 const audio = new AudioEngine();
@@ -108,7 +113,14 @@ async function init() {
   } catch {}
 
   audio.onMicLevel = (lvl) => (state.micLevel = lvl);
-  audio.onPcm = (buf) => state.translator?.sendPcm(buf);
+  // Echo guard: unless the user wears headphones, feed the translator silence while the partner's
+  // translated voice is playing from the speakers, so it can't be picked up and translated back.
+  audio.onPcm = (buf) => {
+    if (!state.translator) return;
+    const guard = !state.headphones && audio.isPlayingIncoming();
+    state.translator.sendPcm(guard ? new ArrayBuffer(buf.byteLength) : buf);
+  };
+  el.headphonesBtn.setAttribute('aria-pressed', String(state.headphones));
 
   await startMedia();
   requestAnimationFrame(tick);
@@ -216,6 +228,7 @@ function enterCall() {
   el.captions.innerHTML = '';
   setPartner(null);
   setXlStatus('idle');
+  audio.setupPlayback();
   connectSignal();
 }
 
@@ -224,7 +237,8 @@ function leaveCall({ toLobby = true } = {}) {
   stopTranslator();
   state.peer?.close();
   state.peer = null;
-  state.remoteAnalyser = null;
+  audio.flushIncoming();
+  setRelaySending(false);
   if (state.signal) {
     state.signal.onclose = null;
     state.signal.close();
@@ -244,13 +258,26 @@ function connectSignal() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/signal`);
   state.signal = ws;
+  ws.binaryType = 'arraybuffer';
   const sendSignal = (msg) => ws.readyState === WebSocket.OPEN && ws.send(JSON.stringify(msg));
+  state.sendSignal = sendSignal;
 
   ws.onopen = () => sendSignal({ type: 'join', room: state.room, name: state.me.name, lang: state.me.lang });
 
   ws.onmessage = (ev) => {
+    if (typeof ev.data !== 'string') return handleBinary(ev.data);
     const msg = JSON.parse(ev.data);
     switch (msg.type) {
+      case 'seg':
+        renderCaption(msg.seg);
+        upsertTranscript(msg.seg, 'partner');
+        break;
+      case 'cam':
+        state.partnerCamOn = msg.on;
+        break;
+      case 'need-relay':
+        setRelaySending(msg.on);
+        break;
       case 'joined':
         if (msg.peer) {
           setPartner(msg.peer);
@@ -278,7 +305,8 @@ function connectSignal() {
         toast(`${state.partner?.name || 'Your partner'} left the call`);
         state.peer?.close();
         state.peer = null;
-        state.remoteAnalyser = null;
+        audio.flushIncoming();
+        setRelaySending(false);
         el.remoteVideo.srcObject = null;
         setPartner(null);
         break;
@@ -309,7 +337,7 @@ function createPeer(initiator, sendSignal) {
     iceServers: state.config.iceServers,
     sendSignal,
     videoTrack: state.stream?.getVideoTracks()[0],
-    audioTrack: audio.translatedTrack,
+    audioTrack: null, // translated voice travels via the server (works on every network)
     initiator,
   });
   state.peer = peer;
@@ -318,20 +346,9 @@ function createPeer(initiator, sendSignal) {
     const stream = e.detail;
     if (el.remoteVideo.srcObject !== stream) el.remoteVideo.srcObject = stream;
     el.remoteVideo.play().catch(() => {});
-    if (!state.remoteAnalyser && stream.getAudioTracks().length) state.remoteAnalyser = audio.analyserFor(stream);
-    const vt = stream.getVideoTracks()[0];
-    if (vt) {
-      const sync = () => (el.remotePlaceholder.hidden = !vt.muted && vt.readyState === 'live');
-      vt.onmute = vt.onunmute = sync;
-      sync();
-    }
   });
-  peer.addEventListener('state', (e) => {
-    el.connDot.dataset.state = e.detail;
-    if (e.detail === 'failed') toast('Video connection failed — retrying…');
-  });
-  peer.addEventListener('data', (e) => handlePeerData(e.detail));
-  peer.addEventListener('channel-open', () => peer.send({ type: 'cam', on: state.camOn }));
+  peer.addEventListener('state', (e) => sendSignal({ type: 'rtc-state', state: e.detail }));
+  sendSignal({ type: 'cam', on: state.camOn });
 }
 
 function setPartner(p) {
@@ -340,6 +357,8 @@ function setPartner(p) {
   el.partnerChip.hidden = !p;
   el.call.classList.toggle('waiting-mode', !p);
   if (!p) {
+    state.partnerSince = 0;
+    state.partnerCamOn = true;
     stopTranslator();
     el.remotePlaceholder.hidden = false;
     el.remoteAvatar.textContent = '?';
@@ -347,6 +366,7 @@ function setPartner(p) {
     setXlStatus('idle');
     return;
   }
+  if (!state.partnerSince) state.partnerSince = performance.now();
   el.partnerName.textContent = p.name;
   el.partnerLang.textContent = languageName(p.lang);
   el.remoteAvatar.textContent = (p.name || '?').trim().charAt(0).toUpperCase();
@@ -360,13 +380,18 @@ function startTranslator(target) {
   if (!state.translator) {
     const t = new LiveTranslator({ target });
     t.addEventListener('status', (e) => setXlStatus(e.detail.state, e.detail.message));
-    t.addEventListener('audio', (e) => audio.playTranslated(e.detail.pcm));
+    t.addEventListener('audio', (e) => {
+      const pcm = e.detail.pcm;
+      let peak = 0;
+      for (let i = 0; i < pcm.length; i += 4) peak = Math.max(peak, Math.abs(pcm[i]));
+      if (peak < 8) return; // pure digital silence — nothing to play
+      sendBinary(1, new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength));
+    });
     t.addEventListener('input', (e) => onOwnSpeech('original', e.detail.text, e.detail.lang));
     t.addEventListener('output', (e) => onOwnSpeech('translated', e.detail.text, e.detail.lang));
     t.addEventListener('turn', () => scheduleFinalize(900));
     state.translator = t;
   } else if (state.translator.target !== target) {
-    audio.flushTranslated();
     finalizeSegment();
   }
   state.translator.setTarget(target);
@@ -376,7 +401,6 @@ function startTranslator(target) {
 function stopTranslator() {
   state.translator?.stop();
   state.translator = null;
-  audio.flushTranslated();
   finalizeSegment();
 }
 
@@ -394,7 +418,7 @@ function setXlStatus(s, message) {
   if (s === 'error') toast(message || 'Translator error', 6000);
 }
 
-// Outgoing segment: what I said + how it was translated. Shared with the partner via data channel.
+// Outgoing segment: what I said + how it was translated. Sent to the partner via the server.
 let seg = null;
 let segTimer = null;
 
@@ -426,7 +450,7 @@ function finalizeSegment() {
 function publishSegment() {
   if (!seg) return;
   const snapshot = { ...seg };
-  state.peer?.send({ type: 'seg', seg: snapshot, from: state.me.name });
+  state.sendSignal?.({ type: 'seg', seg: snapshot, from: state.me.name });
   renderOutgoing(snapshot);
   upsertTranscript(snapshot, 'me');
 }
@@ -452,14 +476,95 @@ function renderOutgoing(s) {
 // ---------------------------------------------------------------------------
 // Incoming captions (partner's speech, translated into my language)
 // ---------------------------------------------------------------------------
-function handlePeerData(msg) {
-  if (msg.type === 'seg') {
-    renderCaption(msg.seg);
-    upsertTranscript(msg.seg, 'partner');
-  } else if (msg.type === 'cam') {
-    el.remotePlaceholder.hidden = msg.on;
+// Binary frames relayed by the server: [1][PCM 24 kHz] = partner's translated voice, [2][JPEG] = fallback video.
+function sendBinary(kind, bytes) {
+  const ws = state.signal;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const out = new Uint8Array(bytes.byteLength + 1);
+  out[0] = kind;
+  out.set(bytes, 1);
+  ws.send(out);
+}
+
+let relayFrameAt = 0;
+const relayCtx = el.relayCanvas.getContext('2d');
+function handleBinary(buf) {
+  const kind = new Uint8Array(buf, 0, 1)[0];
+  const payload = buf.slice(1);
+  if (kind === 1) {
+    if (payload.byteLength % 2 === 0) audio.playIncoming(new Int16Array(payload));
+  } else if (kind === 2) {
+    createImageBitmap(new Blob([payload], { type: 'image/jpeg' }))
+      .then((bmp) => {
+        relayCtx.drawImage(bmp, 0, 0, el.relayCanvas.width, el.relayCanvas.height);
+        bmp.close();
+        relayFrameAt = performance.now();
+      })
+      .catch(() => {});
   }
 }
+
+// ---------------------------------------------------------------------------
+// Video: direct WebRTC when possible, automatic server relay when not
+// ---------------------------------------------------------------------------
+const RELAY_SIZE = 400;
+const relaySrc = Object.assign(document.createElement('canvas'), { width: RELAY_SIZE, height: RELAY_SIZE });
+const relaySrcCtx = relaySrc.getContext('2d');
+let relayTimer = null;
+let relayBusy = false;
+
+function setRelaySending(on) {
+  if (on && !relayTimer) relayTimer = setInterval(sendRelayFrame, 100); // ~10 fps
+  if (!on && relayTimer) {
+    clearInterval(relayTimer);
+    relayTimer = null;
+  }
+}
+
+function sendRelayFrame() {
+  const v = el.localVideo;
+  if (relayBusy || !state.camOn || !v.videoWidth || (state.signal?.bufferedAmount || 0) > 256 * 1024) return;
+  const side = Math.min(v.videoWidth, v.videoHeight); // centre square — it's shown in a circle anyway
+  relaySrcCtx.drawImage(v, (v.videoWidth - side) / 2, (v.videoHeight - side) / 2, side, side, 0, 0, RELAY_SIZE, RELAY_SIZE);
+  relayBusy = true;
+  relaySrc.toBlob(
+    async (blob) => {
+      relayBusy = false;
+      if (blob) sendBinary(2, new Uint8Array(await blob.arrayBuffer()));
+    },
+    'image/jpeg',
+    0.62,
+  );
+}
+
+// Watches whether direct video is actually flowing; if not, asks the partner to relay frames via the server.
+let lastVideoTime = -1;
+let lastVideoAdvance = 0;
+let needRelaySent = null;
+setInterval(() => {
+  if (!state.inCall || !state.partner) {
+    el.relayCanvas.hidden = true;
+    needRelaySent = null;
+    return;
+  }
+  const now = performance.now();
+  const v = el.remoteVideo;
+  if (v.srcObject && v.videoWidth > 0 && v.currentTime !== lastVideoTime) {
+    lastVideoTime = v.currentTime;
+    lastVideoAdvance = now;
+  }
+  const direct = now - lastVideoAdvance < 2500;
+  const need = !direct && now - state.partnerSince > 4000;
+  if (need !== needRelaySent) {
+    needRelaySent = need;
+    state.sendSignal?.({ type: 'need-relay', on: need });
+  }
+  const relayed = !direct && now - relayFrameAt < 2500;
+  el.relayCanvas.hidden = !relayed;
+  el.remotePlaceholder.hidden = state.partnerCamOn && (direct || relayed);
+  el.connDot.dataset.state = direct ? 'connected' : relayed ? 'relay' : 'connecting';
+  el.connDot.title = direct ? 'Direct video connection' : relayed ? 'Video relayed through the server' : 'Connecting video…';
+}, 500);
 
 const capTimers = new Map();
 function renderCaption(s) {
@@ -544,7 +649,14 @@ el.camBtn.addEventListener('click', () => {
   el.camBtn.setAttribute('aria-pressed', String(state.camOn));
   el.camBtn.title = state.camOn ? 'Turn camera off' : 'Turn camera on';
   el.selfTile.classList.toggle('cam-off', !state.camOn);
-  state.peer?.send({ type: 'cam', on: state.camOn });
+  state.sendSignal?.({ type: 'cam', on: state.camOn });
+});
+
+el.headphonesBtn.addEventListener('click', () => {
+  state.headphones = !state.headphones;
+  localStorage.setItem('portal.headphones', state.headphones ? '1' : '0');
+  el.headphonesBtn.setAttribute('aria-pressed', String(state.headphones));
+  toast(state.headphones ? 'Headphones mode: you can talk while your partner is being translated' : 'Speaker mode: your mic pauses while your partner’s translation plays');
 });
 
 el.ccBtn.addEventListener('click', () => {
@@ -607,7 +719,7 @@ function tick() {
   } else {
     drawBars(selfBars, mic);
     selfOrb.style.setProperty('--lvl', mic.toFixed(3));
-    smoothRemote = Math.max(AudioEngine.level(state.remoteAnalyser), smoothRemote * 0.88);
+    smoothRemote = Math.max(AudioEngine.level(audio.inAnalyser), smoothRemote * 0.88);
     const remote = Math.min(1, smoothRemote * 7);
     drawBars(partnerBars, remote);
     if (state.partner) remoteOrb.style.setProperty('--lvl', remote.toFixed(3));

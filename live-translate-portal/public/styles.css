@@ -347,6 +347,13 @@ select option {
   object-fit: cover;
   display: block;
 }
+.relay-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
 .mirror {
   transform: scaleX(-1);
 }
@@ -357,8 +364,8 @@ select option {
   border-radius: 50%;
   background: conic-gradient(from 0deg, var(--g-blue), var(--g-green), var(--g-yellow), var(--g-red), var(--g-blue));
   filter: blur(34px);
-  opacity: calc(0.12 + var(--lvl) * 0.75);
-  transform: scale(calc(0.86 + var(--lvl) * 0.24));
+  opacity: calc(0.12 + var(--lvl) * 0.5);
+  transform: scale(calc(0.86 + var(--lvl) * 0.16));
   transition: opacity 0.12s linear, transform 0.12s linear;
   animation: spin 14s linear infinite;
 }
@@ -623,6 +630,9 @@ h1 {
 .dot[data-state='connecting'] {
   background: var(--g-yellow);
 }
+.dot[data-state='relay'] {
+  background: var(--g-blue);
+}
 .dot[data-state='failed'],
 .dot[data-state='disconnected'] {
   background: var(--danger);
@@ -806,8 +816,9 @@ h1 {
   right: 28px;
   bottom: 112px;
   display: flex;
+  flex-direction: column;
   align-items: flex-end;
-  gap: 16px;
+  gap: 18px;
   z-index: 6;
   transition: right 0.35s var(--ease);
 }
@@ -862,7 +873,6 @@ h1 {
 }
 .outgoing {
   width: 260px;
-  margin-bottom: 18px;
   padding: 12px 16px 14px;
   border-radius: 20px 20px 4px 20px;
   background: var(--surface);
@@ -1084,6 +1094,15 @@ h1 {
 /* ==========================================================================
    Responsive
    ========================================================================== */
+@media (min-width: 901px) {
+  .captions {
+    width: min(860px, calc(100vw - 640px));
+  }
+  .call.transcript-open .captions {
+    width: min(860px, calc(100vw - min(400px, 40vw) - 640px));
+  }
+}
+
 @media (max-width: 900px) {
   body {
     overflow: auto;

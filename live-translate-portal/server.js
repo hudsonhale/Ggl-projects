@@ -68,7 +68,20 @@ function handleSignal(ws) {
   ws.room = null;
   ws.profile = null;
 
-  ws.on('message', (raw) => {
+  ws.on('message', (raw, isBinary) => {
+    // Binary frames: [type byte][payload]. 1 = translated voice (PCM 24 kHz), 2 = fallback video (JPEG).
+    // Relayed verbatim to the other peer. This path works on any network, unlike peer-to-peer WebRTC.
+    if (isBinary) {
+      if (!ws.room) return;
+      const kind = raw[0];
+      for (const p of rooms.get(ws.room) || []) {
+        if (p === ws || p.readyState !== WebSocket.OPEN) continue;
+        if (kind === 2 && p.bufferedAmount > 512 * 1024) continue; // drop video frames if the link is congested
+        p.send(raw, { binary: true });
+      }
+      return;
+    }
+
     let msg;
     try {
       msg = JSON.parse(raw.toString());
@@ -86,6 +99,7 @@ function handleSignal(ws) {
       ws.profile = { name: String(msg.name || 'Guest').slice(0, 40), lang: String(msg.lang || 'en') };
       peers.add(ws);
       rooms.set(room, peers);
+      console.log(`[room ${room}] ${ws.profile.name} (${ws.profile.lang}) joined — ${peers.size}/2`);
 
       const other = [...peers].find((p) => p !== ws);
       send(ws, { type: 'joined', room, peer: other ? other.profile : null });
@@ -101,6 +115,7 @@ function handleSignal(ws) {
     if (msg.type === 'profile' && msg.profile) {
       ws.profile = { ...ws.profile, ...msg.profile };
     }
+    if (msg.type === 'rtc-state') console.log(`[room ${ws.room}] ${ws.profile?.name}: video link ${msg.state}`);
     for (const p of rooms.get(ws.room) || []) {
       if (p !== ws) send(p, msg);
     }
@@ -111,6 +126,7 @@ function handleSignal(ws) {
     const peers = rooms.get(ws.room);
     if (!peers) return;
     peers.delete(ws);
+    console.log(`[room ${ws.room}] ${ws.profile?.name} left — ${peers.size}/2`);
     for (const p of peers) send(p, { type: 'peer-left' });
     if (peers.size === 0) rooms.delete(ws.room);
   });
@@ -133,6 +149,7 @@ function handleTranslate(client, url) {
   const pending = [];
 
   upstream.on('open', () => {
+    console.log(`[gemini] translation session opened → ${target}`);
     upstream.send(
       JSON.stringify({
         setup: {
@@ -162,6 +179,7 @@ function handleTranslate(client, url) {
 
   upstream.on('close', (code, reason) => {
     const why = reason?.toString() || '';
+    console.log(`[gemini] session closed (${code}) ${why}`);
     if (client.readyState === WebSocket.OPEN) {
       if (code !== 1000) client.send(JSON.stringify({ error: { code, message: why || `Upstream closed (${code})` } }));
       client.close(code === 1000 ? 1000 : 4002, why.slice(0, 120));

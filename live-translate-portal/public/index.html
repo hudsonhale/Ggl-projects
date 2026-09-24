@@ -133,7 +133,8 @@
         <div class="orb" id="remoteOrb">
           <div class="halo" aria-hidden="true"></div>
           <div class="circle">
-            <video id="remoteVideo" autoplay playsinline></video>
+            <video id="remoteVideo" autoplay playsinline muted></video>
+            <canvas id="relayCanvas" class="relay-canvas" width="480" height="480" hidden></canvas>
             <div id="remotePlaceholder" class="remote-placeholder">
               <div class="avatar" id="remoteAvatar">?</div>
             </div>
@@ -203,6 +204,9 @@
         </button>
         <button id="transcriptBtn" class="dock-btn toggle" type="button" aria-pressed="false" title="Conversation transcript">
           <span class="ms">chat</span>
+        </button>
+        <button id="headphonesBtn" class="dock-btn toggle" type="button" aria-pressed="false" title="I'm wearing headphones (lets you talk over your partner)">
+          <span class="ms">headphones</span>
         </button>
         <label class="dock-lang" title="Your language">
           <span class="ms">translate</span>
