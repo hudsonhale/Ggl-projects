@@ -261,15 +261,23 @@ function loadOrCreateCert() {
   return { key: pems.private, cert: pems.cert };
 }
 
+// Hosted platforms (Cloud Run / Google AI Studio) provide HTTPS themselves and only
+// route one port, so the self-signed LAN listener is only used on a local machine.
+const ENABLE_LAN_HTTPS = !process.env.K_SERVICE && !process.env.DISABLE_HTTPS;
+
 const httpServer = http.createServer(app);
 attachUpgrade(httpServer);
 httpServer.listen(PORT, () => {
   console.log(`\n  Live Translate Portal`);
   console.log(`  ─────────────────────`);
   console.log(`  Local:    http://localhost:${PORT}`);
+  if (!ENABLE_LAN_HTTPS) {
+    console.log(`  Model:    ${MODEL}`);
+    if (!API_KEY) console.warn('  ⚠  GEMINI_API_KEY is not set.');
+  }
 });
 
-try {
+if (ENABLE_LAN_HTTPS) try {
   const httpsServer = https.createServer(loadOrCreateCert(), app);
   attachUpgrade(httpsServer);
   httpsServer.listen(HTTPS_PORT, () => {

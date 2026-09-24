@@ -1,0 +1,8 @@
+{
+  "name": "Portal — Live Translate",
+  "description": "Two-way video calls with real-time, voice-preserving speech translation powered by Gemini 3.5 Live Translate. Each person hears the other in their own language, in the speaker's voice, with live captions.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

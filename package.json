@@ -1,0 +1,22 @@
+{
+  "name": "ggl-projects",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Portal — two-way video calls with real-time, voice-preserving translation (Gemini 3.5 Live Translate). Root entry point for Google AI Studio / Cloud Run; the app lives in live-translate-portal/.",
+  "type": "module",
+  "main": "live-translate-portal/server.js",
+  "scripts": {
+    "dev": "node live-translate-portal/server.js",
+    "build": "echo \"No build step — static client + Node server\"",
+    "start": "node live-translate-portal/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "selfsigned": "^2.4.1",
+    "ws": "^8.18.0"
+  }
+}
