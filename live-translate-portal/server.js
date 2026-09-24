@@ -8,7 +8,7 @@
  *     The API key never leaves the server; the server sends the (locked) setup message
  *     containing the translation config, then pipes audio/transcripts both ways.
  */
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import express from 'express';
 import http from 'node:http';
 import https from 'node:https';
@@ -22,7 +22,26 @@ import selfsigned from 'selfsigned';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
 const HTTPS_PORT = Number(process.env.HTTPS_PORT || 3443);
-const API_KEY = process.env.GEMINI_API_KEY || '';
+
+// Also load env files from the repo root (Google AI Studio runs from there and may
+// write .env / .env.local), without overriding real environment variables/secrets.
+for (const f of ['.env.local', '.env']) {
+  for (const dir of [process.cwd(), __dirname, path.join(__dirname, '..')]) {
+    const p = path.join(dir, f);
+    if (fs.existsSync(p)) dotenv.config({ path: p });
+  }
+}
+
+// The key is looked up on every use (not cached at boot) so a secret added in
+// AI Studio → Settings → Secrets is picked up as soon as it is injected.
+const KEY_NAMES = ['GEMINI_API_KEY', 'API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENAI_API_KEY'];
+function getApiKey() {
+  for (const name of KEY_NAMES) {
+    const v = (process.env[name] || '').trim();
+    if (v && !/^(MY_|YOUR_|PLACEHOLDER|<)/i.test(v) && v.length > 20) return v;
+  }
+  return '';
+}
 const MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-live-translate-preview';
 const GEMINI_WS_URL =
   'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent';
@@ -51,7 +70,7 @@ app.get('/api/config', (_req, res) => {
       credential: process.env.TURN_CREDENTIAL,
     });
   }
-  res.json({ iceServers, model: MODEL, hasApiKey: Boolean(API_KEY) });
+  res.json({ iceServers, model: MODEL, hasApiKey: Boolean(getApiKey()) });
 });
 
 // ---------------------------------------------------------------------------
@@ -139,13 +158,13 @@ function handleTranslate(client, url) {
   let target = url.searchParams.get('target') || 'en';
   if (!SUPPORTED_LANGS.has(target)) target = 'en';
 
-  if (!API_KEY) {
-    client.send(JSON.stringify({ error: { message: 'Server is missing GEMINI_API_KEY. Add it to .env and restart.' } }));
+  if (!getApiKey()) {
+    client.send(JSON.stringify({ error: { message: 'Server is missing GEMINI_API_KEY. Add it in AI Studio → Settings → Secrets (or .env locally).' } }));
     client.close(4001, 'Missing API key');
     return;
   }
 
-  const upstream = new WebSocket(`${GEMINI_WS_URL}?key=${encodeURIComponent(API_KEY)}`);
+  const upstream = new WebSocket(`${GEMINI_WS_URL}?key=${encodeURIComponent(getApiKey())}`);
   const pending = [];
 
   upstream.on('open', () => {
@@ -273,7 +292,7 @@ httpServer.listen(PORT, () => {
   console.log(`  Local:    http://localhost:${PORT}`);
   if (!ENABLE_LAN_HTTPS) {
     console.log(`  Model:    ${MODEL}`);
-    if (!API_KEY) console.warn('  ⚠  GEMINI_API_KEY is not set.');
+    if (!getApiKey()) console.warn('  ⚠  GEMINI_API_KEY is not set.');
   }
 });
 
@@ -283,7 +302,7 @@ if (ENABLE_LAN_HTTPS) try {
   httpsServer.listen(HTTPS_PORT, () => {
     for (const ip of lanAddresses()) console.log(`  Network:  https://${ip}:${HTTPS_PORT}   (self-signed — accept the browser warning)`);
     console.log(`  Model:    ${MODEL}`);
-    if (!API_KEY) console.warn('\n  ⚠  GEMINI_API_KEY is not set. Copy .env.example to .env and add your key.\n');
+    if (!getApiKey()) console.warn('\n  ⚠  GEMINI_API_KEY is not set. Copy .env.example to .env and add your key.\n');
     else console.log('');
   });
 } catch (err) {
