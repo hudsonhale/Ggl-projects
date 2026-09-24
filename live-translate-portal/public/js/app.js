@@ -110,6 +110,16 @@ async function init() {
   try {
     state.config = await (await fetch('/api/config')).json();
     el.keyWarning.hidden = state.config.hasApiKey;
+    if (!state.config.hasApiKey && state.config.keyDiag) {
+      const d = state.config.keyDiag;
+      const pre = document.createElement('pre');
+      pre.style.cssText = 'white-space:pre-wrap;font-size:11px;margin:8px 0 0;opacity:.85';
+      pre.textContent =
+        `Server sees: ${d.vars.join('; ')}\n` +
+        `Env files: ${d.envFiles.join(', ') || 'none'}\n` +
+        `Server started ${d.serverStartedSecondsAgo}s ago`;
+      el.keyWarning.querySelector('span:last-child').appendChild(pre);
+    }
   } catch {}
 
   audio.onMicLevel = (lvl) => (state.micLevel = lvl);

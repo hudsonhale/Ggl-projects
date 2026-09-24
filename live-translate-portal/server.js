@@ -37,10 +37,19 @@ for (const f of ['.env.local', '.env']) {
 const KEY_NAMES = ['GEMINI_API_KEY', 'API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENAI_API_KEY'];
 function getApiKey() {
   for (const name of KEY_NAMES) {
-    const v = (process.env[name] || '').trim();
+    const v = cleanKey(process.env[name]);
     if (v && !/^(MY_|YOUR_|PLACEHOLDER|<)/i.test(v) && v.length > 20) return v;
   }
+  // Fallback: any variable whose value looks like a Gemini key, whatever it's called.
+  for (const v of Object.values(process.env)) if (looksLikeGeminiKey(v)) return cleanKey(v);
   return '';
+}
+function cleanKey(v) {
+  return String(v || '').trim().replace(/^["']|["']$/g, '').replace(/^GEMINI_API_KEY\s*=\s*/, '').trim();
+}
+function looksLikeGeminiKey(v) {
+  const s = cleanKey(v);
+  return /^(AIza[0-9A-Za-z_-]{30,}|AQ\.[0-9A-Za-z_.-]{30,})$/.test(s);
 }
 const MODEL = process.env.GEMINI_MODEL || 'gemini-3.5-live-translate-preview';
 const GEMINI_WS_URL =
@@ -70,8 +79,28 @@ app.get('/api/config', (_req, res) => {
       credential: process.env.TURN_CREDENTIAL,
     });
   }
-  res.json({ iceServers, model: MODEL, hasApiKey: Boolean(getApiKey()) });
+  const hasApiKey = Boolean(getApiKey());
+  res.json({ iceServers, model: MODEL, hasApiKey, ...(hasApiKey ? {} : { keyDiag: keyDiagnostics() }) });
 });
+
+// Safe diagnostics: never returns key values — only names, lengths and a 3-char prefix.
+function keyDiagnostics() {
+  const vars = Object.entries(process.env)
+    .filter(([k, v]) => /KEY|GEMINI|GOOGLE|GENAI|SECRET|TOKEN/i.test(k) || looksLikeGeminiKey(v))
+    .map(([k, v]) => `${k} (len ${String(v || '').length}${v ? `, starts "${String(v).trim().slice(0, 3)}"` : ''})`);
+  const envFiles = [];
+  for (const f of ['.env.local', '.env']) {
+    for (const dir of [process.cwd(), __dirname, path.join(__dirname, '..')]) {
+      const p = path.join(dir, f);
+      if (fs.existsSync(p)) envFiles.push(path.relative(process.cwd(), p) || f);
+    }
+  }
+  return {
+    vars: vars.length ? vars : ['(no key-like environment variables)'],
+    envFiles: [...new Set(envFiles)],
+    serverStartedSecondsAgo: Math.round(process.uptime()),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Signaling: rooms of two
