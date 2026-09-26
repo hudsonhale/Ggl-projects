@@ -1,0 +1,5 @@
+{
+  "name": "explode me",
+  "description": "Photograph an object, explore its researched 3D parts, and discover its origin.",
+  "requestFramePermissions": ["camera"]
+}

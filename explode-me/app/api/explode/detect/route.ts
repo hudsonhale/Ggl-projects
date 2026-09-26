@@ -1,0 +1,2 @@
+import {authorize,detect,keyFor,modelFor,parsePayload,readBody,respondError} from '@/lib/explode/gemini-server';
+export async function POST(request:Request){try{await authorize(request);const key=keyFor(request),body=parsePayload(await readBody(request));const candidates=await detect(key,modelFor(request),body.image,body.clarification,request.signal);return Response.json({candidates},{headers:{'Cache-Control':'no-store'}})}catch(e){return respondError(e)}}
